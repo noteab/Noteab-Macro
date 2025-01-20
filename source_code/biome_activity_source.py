@@ -1,7 +1,7 @@
 import json, requests, time, os, threading, re, webbrowser, random, keyboard, webbrowser, pyautogui, pytesseract
 import pyscreenrec
 import pygetwindow as gw
-import win32com.client
+
 from tkinter import ttk
 from tkinter import messagebox, filedialog
 from PIL import Image, ImageTk, ImageGrab
@@ -68,6 +68,7 @@ class BiomePresence():
         self.logs_dir = os.path.join(os.getenv('LOCALAPPDATA'), 'Roblox', 'logs')
         self.ahk = None
         self.config = self.load_config()
+        self.auras_data = self.load_auras_json()
         
         self.biome_data = {
             "WINDY": {"color": 0x9ae5ff, "duration": 120, "thumbnail_url": "https://i.postimg.cc/6qPH4wy6/image.png"},
@@ -83,7 +84,9 @@ class BiomePresence():
             "GLITCHED": {"color": 0xbfff00, "duration": 164, "thumbnail_url": "https://i.postimg.cc/bwJT4PxN/image.png"}
         }
         
+        self.current_biome = None
         self.last_sent = {biome: datetime.min for biome in self.biome_data}
+        self.last_sent_biome = None
         self.biome_counts = self.config.get("biome_counts", {biome: 0 for biome in self.biome_data})
         self.start_time = None
         self.saved_session = self.parse_session_time(self.config.get("session_time", "0:00:00"))
@@ -106,6 +109,9 @@ class BiomePresence():
         # start gui
         self.variables = {}
         self.init_gui()
+        
+        # aura detection:
+        self.last_aura_found = None
        
     def load_logs(self):
         if os.path.exists('macro_logs.txt'):
@@ -151,12 +157,11 @@ class BiomePresence():
             "selected_theme": self.root.style.theme.name,
             "dont_ask_for_update": self.config.get("dont_ask_for_update", False),
             "ui_navigation_key": self.ui_navigation_key_var.get(),
-
             "merchant_teleporter": self.mt_var.get(),
             "mt_duration": self.mt_duration_var.get(),
             "Mari_Items": self.config.get("Mari_Items", {}),
             "Jester_Items": self.config.get("Jester_Items", {}),
-            "ping_mari":self.ping_mari_var.get(),
+            "ping_mari": self.ping_mari_var.get(),
             "mari_user_id": self.mari_user_id_var.get(),
             "ping_jester": self.ping_jester_var.get(),
             "jester_user_id": self.jester_user_id_var.get(),
@@ -166,7 +171,11 @@ class BiomePresence():
             "purchase_button": self.config.get("purchase_button", [0, 0]),
             "first_item_slot_pos": self.config.get("first_item_slot_pos", [0, 0]),
             "merchant_name_ocr_pos": self.config.get("merchant_name_ocr_pos", [0, 0, 0, 0]),
-            "item_name_ocr_pos": self.config.get("item_name_ocr_pos", [0, 0, 0, 0])
+            "item_name_ocr_pos": self.config.get("item_name_ocr_pos", [0, 0, 0, 0]),
+            "enable_aura_detection": self.enable_aura_detection_var.get(),
+            "send_minimum": self.send_minimum_var.get(),
+            "ping_minimum": self.ping_minimum_var.get(),
+            "aura_user_id": self.aura_user_id_var.get(),
         })
 
         if not config["auto_buff_glitched"]:
@@ -191,6 +200,8 @@ class BiomePresence():
                     config = json.load(file)
                     return config
         return {"biome_counts": {biome: 0 for biome in self.biome_data}, "session_time": "0:00:00"}
+    
+    
             
     def init_gui(self):
         selected_theme = self.config.get("selected_theme", "solar")
@@ -198,22 +209,24 @@ class BiomePresence():
         icon_path = os.path.join(abslt_path, "NoteabBiomeTracker.ico")
         
         self.root = ttk.Window(themename=selected_theme)
-        self.root.title("Noteab's Biome Macro (v1.5.3) (Idle)")
+        self.root.title("Noteab's Biome Macro (v1.5.4-patch1) (Idle)")
         self.root.geometry("620x360")
-        self.root.iconbitmap(default=icon_path)
-        self.variables = {biome: ttk.StringVar(master=self.root, value=self.config.get("biome_notifier", {}).get(biome, "None"))
-                        for biome in self.biome_data}
-
+        
         try:
             self.root.iconbitmap(icon_path)
         except Exception as e:
             pass
+            
+        self.variables = {biome: ttk.StringVar(master=self.root, value=self.config.get("biome_notifier", {}).get(biome, "None"))
+                        for biome in self.biome_data}
+
         
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill='both', expand=True, padx=10, pady=10)
 
         webhook_frame = ttk.Frame(notebook)
         misc_frame = ttk.Frame(notebook)
+        aura_webhook_frame = ttk.Frame(notebook)
         merchant_frame = ttk.Frame(notebook)
         credits_frame = ttk.Frame(notebook)
         stats_frame = ttk.Frame(notebook)
@@ -221,11 +234,13 @@ class BiomePresence():
         notebook.add(webhook_frame, text='Webhook')
         notebook.add(misc_frame, text='Misc')
         notebook.add(merchant_frame, text='Merchant')
+        notebook.add(aura_webhook_frame, text='Auras')
         notebook.add(stats_frame, text='Stats')
         notebook.add(credits_frame, text='Credits')
 
         self.create_webhook_tab(webhook_frame)
         self.create_misc_tab(misc_frame)
+        self.create_auras_tab(aura_webhook_frame)
         self.create_merchant_tab(merchant_frame)
         self.create_stats_tab(stats_frame)
         self.create_credit_tab(credits_frame)
@@ -259,14 +274,14 @@ class BiomePresence():
         self.save_config()
 
     def check_for_updates(self):
-        current_version = "v1.5.3"
+        current_version = "v1.5.4-patch1"
         dont_ask_again = self.config.get("dont_ask_for_update", False)
         
         if dont_ask_again:
             return
         
         try:
-            response = requests.get("https://api.github.com/repos/noteab/Sol-Biome-Tracker/releases/latest")
+            response = requests.get("https://api.github.com/repos/noteab/Noteab-Macro/releases/latest")
             response.raise_for_status()
             latest_release = response.json()
             latest_version = latest_release['tag_name']
@@ -421,7 +436,7 @@ class BiomePresence():
         auto_record_check.grid(row=1, column=0, padx=5, sticky="w")
 
         ttk.Label(hp2_frame, text="Record Duration (seconds):").grid(row=1, column=1, padx=5)
-        self.record_duration_var = ttk.StringVar(value=self.config.get("record_duration", ""))
+        self.record_duration_var = ttk.StringVar(value=self.config.get("record_duration", "60"))
         record_duration_entry = ttk.Entry(hp2_frame, textvariable=self.record_duration_var, width=10)
         record_duration_entry.grid(row=1, column=2, padx=5)
         record_duration_entry.bind("<FocusOut>", lambda event: self.save_config())
@@ -443,7 +458,7 @@ class BiomePresence():
         br_check.grid(row=3, column=0, padx=5, sticky="w")
 
         ttk.Label(hp2_frame, text="Usage Duration (minutes):").grid(row=3, column=1, padx=5)
-        self.br_duration_var = ttk.StringVar(value=self.config.get("br_duration", ""))
+        self.br_duration_var = ttk.StringVar(value=self.config.get("br_duration", "30"))
         br_duration_entry = ttk.Entry(hp2_frame, textvariable=self.br_duration_var, width=10)
         br_duration_entry.grid(row=3, column=2, padx=5)
         br_duration_entry.bind("<FocusOut>", lambda event: self.save_config())
@@ -459,7 +474,7 @@ class BiomePresence():
         sc_check.grid(row=4, column=0, padx=5, sticky="w")
 
         ttk.Label(hp2_frame, text="Usage Duration (minutes):").grid(row=4, column=1, padx=5)
-        self.sc_duration_var = ttk.StringVar(value=self.config.get("sc_duration", ""))
+        self.sc_duration_var = ttk.StringVar(value=self.config.get("sc_duration", "15"))
         sc_duration_entry = ttk.Entry(hp2_frame, textvariable=self.sc_duration_var, width=10)
         sc_duration_entry.grid(row=4, column=2, padx=5)
         sc_duration_entry.bind("<FocusOut>", lambda event: self.save_config())
@@ -474,7 +489,7 @@ class BiomePresence():
         mt_check.grid(row=5, column=0, padx=5, sticky="w")
 
         ttk.Label(hp2_frame, text="Usage Duration (minutes):").grid(row=5, column=1, padx=5)
-        self.mt_duration_var = ttk.StringVar(value=self.config.get("mt_duration", ""))
+        self.mt_duration_var = ttk.StringVar(value=self.config.get("mt_duration", "1"))
         mt_duration_entry = ttk.Entry(hp2_frame, textvariable=self.mt_duration_var, width=10)
         mt_duration_entry.grid(row=5, column=2, padx=5)
         mt_duration_entry.bind("<FocusOut>", lambda event: self.save_config())
@@ -492,6 +507,40 @@ class BiomePresence():
             foreground="red"
         )
         reminder_label.grid(row=6, column=0, columnspan=3, padx=5, pady=8, sticky="w")
+        
+    def create_auras_tab(self, frame):
+        self.enable_aura_detection_var = ttk.BooleanVar(value=self.config.get("enable_aura_detection", False))
+        enable_aura_detection_check = ttk.Checkbutton(
+            frame, 
+            text="Enable Aura Detection", 
+            variable=self.enable_aura_detection_var,
+            command=self.save_config
+        )
+        enable_aura_detection_check.pack(anchor="w", padx=5, pady=5)
+
+        aura_frame = ttk.LabelFrame(frame, text="Aura Detection")
+        aura_frame.pack(fill='x', padx=5, pady=5)
+        
+        # Discord UserID (Aura Ping)
+        ttk.Label(aura_frame, text="Discord UserID (Aura Ping):").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.aura_user_id_var = ttk.StringVar(value=self.config.get("aura_user_id", ""))
+        aura_id_entry = ttk.Entry(aura_frame, textvariable=self.aura_user_id_var, width=25)
+        aura_id_entry.grid(row=1, column=1, padx=5, pady=5)
+        aura_id_entry.bind("<FocusOut>", lambda event: self.save_config())
+        
+        # Send Minimum
+        ttk.Label(aura_frame, text="Aura Send Minimum:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        self.send_minimum_var = ttk.StringVar(value=self.config.get("send_minimum", "10000"))
+        send_minimum_entry = ttk.Entry(aura_frame, textvariable=self.send_minimum_var, width=25)
+        send_minimum_entry.grid(row=2, column=1, padx=5, pady=5)
+        send_minimum_entry.bind("<FocusOut>", lambda event: self.save_config())
+
+        # Ping Minimum
+        ttk.Label(aura_frame, text="Aura Ping Minimum:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
+        self.ping_minimum_var = ttk.StringVar(value=self.config.get("ping_minimum", "100000"))
+        ping_minimum_entry = ttk.Entry(aura_frame, textvariable=self.ping_minimum_var, width=25)
+        ping_minimum_entry.grid(row=3, column=1, padx=5, pady=5)
+        ping_minimum_entry.bind("<FocusOut>", lambda event: self.save_config())
 
     def create_merchant_tab(self, frame):
         mari_frame = ttk.LabelFrame(frame, text="Mari")
@@ -724,26 +773,34 @@ class BiomePresence():
         item_frame.pack(padx=10, pady=10, fill='x')
         ttk.Label(item_frame, text="Item Name").grid(row=0, column=0, padx=5, pady=5, sticky="w")
         ttk.Label(item_frame, text="Amount").grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        
+        ttk.Label(item_frame, text="Rebuy").grid(row=0, column=2, padx=5, pady=5, sticky="w")
+
         self.mari_items_vars = {}
         self.mari_items_amounts = {}
+        self.mari_items_rebuy = {}
         saved_mari_items = self.config.get("Mari_Items", {})
 
         for i, item in enumerate(items, start=1):
-            var = ttk.BooleanVar(value=saved_mari_items.get(item, [False, "1"])[0])
+            saved_data = saved_mari_items.get(item, [False, 1, False])
+            var = ttk.BooleanVar(value=saved_data[0])
             self.mari_items_vars[item] = var
             ttk.Checkbutton(item_frame, text=item, variable=var).grid(row=i, column=0, sticky="w", padx=5, pady=2)
-            
-            amount_var = ttk.StringVar(value=str(saved_mari_items.get(item, [False, "1"])[1]))
+
+            amount_var = ttk.StringVar(value=str(saved_data[1]))
             self.mari_items_amounts[item] = amount_var
             ttk.Entry(item_frame, textvariable=amount_var, width=5).grid(row=i, column=1, padx=5, pady=2)
+
+            rebuy_var = ttk.BooleanVar(value=saved_data[2] if len(saved_data) > 2 else False)
+            self.mari_items_rebuy[item] = rebuy_var
+            ttk.Checkbutton(item_frame, variable=rebuy_var).grid(row=i, column=2, sticky="w", padx=5, pady=2)
 
         save_button = ttk.Button(mari_window, text="Save Selections", command=self.save_mari_selections)
         save_button.pack(pady=10)
 
+
     def save_mari_selections(self):
         mari_items = {
-            item: [var.get(), int(self.mari_items_amounts[item].get())]
+            item: [var.get(), int(self.mari_items_amounts[item].get()), self.mari_items_rebuy[item].get()]
             for item, var in self.mari_items_vars.items()
         }
         self.config["Mari_Items"] = mari_items
@@ -756,7 +813,7 @@ class BiomePresence():
         items = [
             "Oblivion Potion", "Heavenly Potion", "Rune of Everything",
             "Rune of Nothing", "Rune Of Corruption", "Rune Of Hell", "Rune of Galaxy",
-            "Rune of Rainstorm", "Rune of Frost", "Rune of Wind", "Strange Potion", 
+            "Rune of Rainstorm", "Rune of Frost", "Rune of Wind", "Strange Potion", "Lucky Potion",
             "Stella's Candle", "Merchant Tracker", "Random Potion Sack"
         ]
 
@@ -764,26 +821,33 @@ class BiomePresence():
         item_frame.pack(padx=10, pady=10, fill='x')
         ttk.Label(item_frame, text="Item Name").grid(row=0, column=0, padx=5, pady=5, sticky="w")
         ttk.Label(item_frame, text="Amount").grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        
+        ttk.Label(item_frame, text="Rebuy").grid(row=0, column=2, padx=5, pady=5, sticky="w")
+
         self.jester_items_vars = {}
         self.jester_items_amounts = {}
+        self.jester_items_rebuy = {}
         saved_jester_items = self.config.get("Jester_Items", {})
 
         for i, item in enumerate(items, start=1):
-            var = ttk.BooleanVar(value=saved_jester_items.get(item, [False, "1"])[0])
+            saved_data = saved_jester_items.get(item, [False, 1, False])
+            var = ttk.BooleanVar(value=saved_jester_items.get(item, [False, 1, False])[0])
             self.jester_items_vars[item] = var
             ttk.Checkbutton(item_frame, text=item, variable=var).grid(row=i, column=0, sticky="w", padx=5, pady=2)
-            
-            amount_var = ttk.StringVar(value=str(saved_jester_items.get(item, [False, "1"])[1]))
+        
+            amount_var = ttk.StringVar(value=str(saved_jester_items.get(item, [False, 1, False])[1]))
             self.jester_items_amounts[item] = amount_var
             ttk.Entry(item_frame, textvariable=amount_var, width=5).grid(row=i, column=1, padx=5, pady=2)
+
+            rebuy_var = ttk.BooleanVar(value=saved_data[2] if len(saved_data) > 2 else False)
+            self.jester_items_rebuy[item] = rebuy_var
+            ttk.Checkbutton(item_frame, variable=rebuy_var).grid(row=i, column=2, sticky="w", padx=5, pady=2)
 
         save_button = ttk.Button(jester_window, text="Save Selections", command=self.save_jester_selections)
         save_button.pack(pady=10)
 
     def save_jester_selections(self):
         jester_items = {
-            item: [var.get(), int(self.jester_items_amounts[item].get())]
+            item: [var.get(), int(self.jester_items_amounts[item].get()), self.jester_items_rebuy[item].get()]
             for item, var in self.jester_items_vars.items()
         }
         self.config["Jester_Items"] = jester_items
@@ -859,11 +923,10 @@ class BiomePresence():
         
     def create_credit_tab(self, credits_frame):
         current_dir = os.getcwd()
+        images_dir = os.path.join(current_dir, "images")
         credit_paths = [
-            os.path.join(current_dir, "tea.png"),
-            os.path.join(current_dir, "maxstellar.png"),
-            os.path.join(current_dir, "source_code", "tea.png"),
-            os.path.join(current_dir, "source_code", "maxstellar.png")
+            os.path.join(images_dir, "tea.png"),
+            os.path.join(images_dir, "maxstellar.png")
         ]
 
         def load_image(filename, size):
@@ -1053,24 +1116,27 @@ class BiomePresence():
             window.destroy()
             
     ## INVENTORY SNIPPING ^^ ##
-
     def validate_and_save_ps_link(self):
         private_server_link = self.private_server_link_entry.get()
         if not self.validate_private_server_link(private_server_link):
             messagebox.showwarning(
                 "Invalid PS Link!",
-                "The private server link you provided is a share link, this is not safe to use due to fake link will get your account terminated. "
-                "To get the code link, paste the share link into your browser and run it. This should convert the link to a privateServerLinkCode link. "
-                "Copy and paste the converted link into the Private Server setting to fix this issue.\n\n"
-                "The link should look like: https://www.roblox.com/games/15532962292/Sols-RNG-Eon1-1?privateServerLinkCode=..."
+                "The link you provided is not a valid Roblox link. It could be either a share link or a private server code link. "
+                "Please ensure the link is correct and try again.\n\n"
+                "Valid links should look like:\n"
+                "- Share link: https://www.roblox.com/share?code=1234567899abcdefxyz&type=Server\n"
+                "- Private server link: https://www.roblox.com/games/15532962292/Sols-RNG-Eon1-1?privateServerLinkCode=..."
             )
             return
 
         self.save_config()
-    
+
     def validate_private_server_link(self, link):
-        pattern = r"https://www\.roblox\.com/games/\d+/Sols-RNG-Eon1-1\?privateServerLinkCode=\w+"
-        return re.match(pattern, link)
+        # Pattern to match share links and private server links
+        share_pattern = r"https://www\.roblox\.com/share\?code=\w+&type=Server"
+        private_server_pattern = r"https://www\.roblox\.com/games/\d+/Sols-RNG-Eon1-1\?privateServerLinkCode=\w+"
+
+        return re.match(share_pattern, link) or re.match(private_server_pattern, link)
 
     def start_detection(self):
         if not self.detection_running:
@@ -1078,7 +1144,9 @@ class BiomePresence():
             self.start_time = datetime.now()
             self.detection_thread = threading.Thread(target=self.biome_loop_check, daemon=True)
             self.detection_thread.start()
-            self.root.title("Noteab's Biome Macro (v1.5.3) (Running)")
+            self.aura_detection_thread = threading.Thread(target=self.aura_loop_check, daemon=True)
+            self.aura_detection_thread.start()
+            self.root.title("Noteab's Biome Macro (v1.5.4-patch1) (Running)")
             self.send_webhook_status("Macro started!", color=0x64ff5e)
             print("Biome detection started.")
 
@@ -1090,7 +1158,7 @@ class BiomePresence():
             self.saved_session += elapsed_time
 
             self.start_time = None
-            self.root.title("Noteab's Biome Macro (v1.5.3) (Stopped)")
+            self.root.title("Noteab's Biome Macro (v1.5.4-patch1) (Stopped)")
             self.send_webhook_status("Macro stopped!", color=0xff0000)
             self.save_config()
             print("Biome detection stopped.")
@@ -1118,7 +1186,60 @@ class BiomePresence():
 
         with open(log_file_path, 'r', encoding='utf-8', errors='ignore') as file:
             return file.readlines()
-    
+        
+    def load_auras_json(self):
+        try:
+            with open(os.path.join(os.path.dirname(__file__), 'auras.json'), 'r') as file:
+                return json.load(file)
+        except Exception as e:
+            print(f"Error loading auras.json: {e}")
+            return {}
+        
+    def check_aura_in_logs(self, log_file_path):
+        if not hasattr(self, 'last_aura_found'):
+            self.last_aura_found = None
+
+        log_lines = self.read_full_log_file(log_file_path)
+
+        for line in reversed(log_lines):
+            try:
+                match = re.search(r'"state":"Equipped \\"(.*?)\\"', line)
+                if match:
+                    aura = match.group(1)
+                    #print(f"Detected aura: {aura}")
+
+                    if aura in self.auras_data:
+                        aura_info = self.auras_data[aura]
+                        rarity = aura_info["rarity"]
+                        exclusive_biome, multiplier = aura_info["exclusive_biome"]
+
+                        # Check if the current biome is GLITCHED
+                        if self.current_biome == "GLITCHED":
+                            rarity /= multiplier
+                            print(f"Adjusted rarity for {aura} in GLITCHED: {rarity}")
+                            biome_message = "[From GLITCHED!]"
+
+                        # Check if the current biome is the aura's exclusive biome
+                        elif self.current_biome == exclusive_biome:
+                            rarity /= multiplier
+                            #print(f"rarity for {aura} in {exclusive_biome}: {rarity}")
+                            biome_message = f"[From {exclusive_biome}!]"
+
+                        else:
+                            biome_message = ""
+
+                        # Format the rarity with commas
+                        formatted_rarity = f"{int(rarity):,}"
+
+                        if aura != self.last_aura_found:
+                            self.send_aura_webhook(aura, formatted_rarity, biome_message)
+                            self.last_aura_found = aura
+                    return
+
+            except Exception as e:
+                print(f"Error processing aura: {e}")
+                continue
+            
     def check_biome_in_logs(self):
         log_file_path = self.get_latest_log_file()
         log_lines = self.read_log_file(log_file_path)
@@ -1161,7 +1282,6 @@ class BiomePresence():
         biome_info = self.biome_data[biome]
         now = datetime.now()
         cooldown = timedelta(seconds=biome_info['duration'])
-        share_ps_radiant = self.config.get("share_radiant_ps_key")
         
         if now - self.last_sent[biome] >= cooldown or self.last_sent[biome] == datetime.min:
             print(f"Detected Biome: {biome}, Color: {biome_info['color']}, Duration: {biome_info['duration']}")
@@ -1189,6 +1309,7 @@ class BiomePresence():
         for other_biome in self.biome_data:
             if other_biome != biome:
                 self.last_sent[other_biome] = datetime.min
+                
             
     def biome_loop_check(self):
         last_log_file = None
@@ -1204,26 +1325,51 @@ class BiomePresence():
 
             # check br/sc cooldown and execute it
             with self.lock: self.auto_biome_change()
-            time.sleep(2)
-        
+            time.sleep(1.2)
+
+    def aura_loop_check(self):
+        last_log_file = None
+
+        while self.detection_running:
+            if self.enable_aura_detection_var.get():
+                
+                current_log_file = self.get_latest_log_file()
+                if current_log_file != last_log_file:
+                    self.last_position = 0
+                    last_log_file = current_log_file
+
+                self.check_aura_in_logs(current_log_file)
+                time.sleep(1.5)
+
+            
     def auto_biome_change(self):
-        mt_cooldown = timedelta(minutes=int(self.mt_duration_var.get()))
+        try:
+            mt_cooldown = timedelta(minutes=int(self.mt_duration_var.get()) if self.mt_duration_var.get() else 1) 
+        except ValueError:
+            mt_cooldown = timedelta(minutes=1)
+
         if self.mt_var.get() and datetime.now() - self.last_mt_time >= mt_cooldown:
             self.use_merchant_teleporter()
             self.last_mt_time = datetime.now()
             
-        sc_cooldown = timedelta(minutes=int(self.sc_duration_var.get()))
+        try:
+            sc_cooldown = timedelta(minutes=int(self.sc_duration_var.get()) if self.sc_duration_var.get() else 15)
+        except ValueError:
+            sc_cooldown = timedelta(minutes=15)
+
         if self.sc_var.get() and datetime.now() - self.last_sc_time >= sc_cooldown:
             self.use_br_sc('strange controller')
             self.last_sc_time = datetime.now()
             
-        br_cooldown = timedelta(minutes=int(self.br_duration_var.get()))
+        try:
+            br_cooldown = timedelta(minutes=int(self.br_duration_var.get()) if self.br_duration_var.get() else 30)
+        except ValueError:
+            br_cooldown = timedelta(minutes=30)
+
         if self.br_var.get() and datetime.now() - self.last_br_time >= br_cooldown:
             self.use_br_sc('biome randomizer')
             self.last_br_time = datetime.now()
             
-        
-
     def use_br_sc(self, item_name):
         if not self.detection_running: return
         time.sleep(1.3)
@@ -1434,32 +1580,31 @@ class BiomePresence():
 
         if merchant_name:
             print(f"Opening merchant interface for {merchant_name}")
-            
+
             x, y = merchant_open_button
             self.ahk.click(x, y, button="left", coord_mode="Screen", click_count=3)
             time.sleep(0.73)
-            
-            
+
             screenshot_dir = os.path.join(os.getcwd(), "images")
             os.makedirs(screenshot_dir, exist_ok=True)
-            
+
             item_screenshot = pyautogui.screenshot()
             screenshot_path = os.path.join(screenshot_dir, "merchant_screenshot.png")
             item_screenshot.save(screenshot_path)
-            
+
             self.send_merchant_webhook(merchant_name, screenshot_path)
-            
 
             auto_buy_items = self.config.get(f"{merchant_name}_Items", {})
             if not auto_buy_items:
                 return
 
-            purchased_items = set()
 
-            # Loop through item slots
+            purchased_items = {}
+            
             for slot_index in range(5):
-                if not self.detection_running: return
-                
+                if not self.detection_running:
+                    return
+
                 x, y = first_item_slot_pos
                 slot_x = x + (slot_index * 185)
                 self.ahk.click(slot_x, y, button="left", coord_mode="Screen", click_count=2)
@@ -1469,9 +1614,9 @@ class BiomePresence():
                 x, y, w, h = item_name_ocr_pos
                 screenshot = pyautogui.screenshot(region=(x, y, w, h))
                 item_text = pytesseract.image_to_string(screenshot, config='--psm 6').strip().lower()
-                
-                self.append_log(f"[Merchant Detection] Detected item text {merchant_name}: {item_text}")
-                 
+
+                self.append_log(f"[Merchant Detection - {merchant_name}] Detected item text: {item_text}")
+
                 corrected_item_name = item_text.split('|')[0].strip()
                 for misdetect, correct in ocrMisdetect_Key.items():
                     if misdetect in corrected_item_name:
@@ -1480,24 +1625,28 @@ class BiomePresence():
                         break
 
                 print(f"Detected item text: {item_text} | Corrected: {corrected_item_name}")
-                
-                for item_name, (enabled, quantity) in auto_buy_items.items():
-                    if enabled and corrected_item_name == item_name.lower() and item_name not in purchased_items:
-                        print(f"Item '{item_name}' found. Proceeding to buy {quantity}.")
-                        
-                        purchase_amount_button = self.config["purchase_amount_button"]
-                        purchase_button = self.config["purchase_button"]
 
-                        self.ahk.click(*purchase_amount_button, button="left", coord_mode="Screen")
-                        self.ahk.send_input(str(quantity))
-                        time.sleep(0.25)
+                for item_name, (enabled, quantity, rebuy) in auto_buy_items.items():
+                    if enabled and corrected_item_name == item_name.lower():
+                        purchased_count = purchased_items.get(item_name, 0)
 
-                        self.ahk.click(*purchase_button, button="left", coord_mode="Screen")
-                        time.sleep(0.75)
-                        self.ahk_hold_left_click(merchant_dialogue_box[0], merchant_dialogue_box[1], holdTime=2130)
-                        purchased_items.add(item_name)
-                        break
-                                
+                        if rebuy or purchased_count == 0:
+                            self.append_log(f"[Merchant Detection - {merchant_name}] - Item {item_name} found. Proceeding to buy {quantity}")
+
+                            purchase_amount_button = self.config["purchase_amount_button"]
+                            purchase_button = self.config["purchase_button"]
+
+                            self.ahk.click(*purchase_amount_button, button="left", coord_mode="Screen")
+                            self.ahk.send_input(str(quantity))
+                            time.sleep(0.25)
+
+                            self.ahk.click(*purchase_button, button="left", coord_mode="Screen")
+                            time.sleep(0.75)
+                            self.ahk_hold_left_click(merchant_dialogue_box[0], merchant_dialogue_box[1], holdTime=2420)
+
+                            purchased_items[item_name] = purchased_count + 1
+                            break
+
             # Update last merchant autobuy
             self.last_merchant_interaction = current_time
         else:
@@ -1580,6 +1729,8 @@ class BiomePresence():
         except requests.exceptions.RequestException as e:
             print(f"Failed to send webhook: {e}")
     
+
+    
     def send_merchant_webhook(self, merchant_name, screenshot_path):
         webhook_url = self.config.get("webhook_url")
         
@@ -1626,6 +1777,59 @@ class BiomePresence():
             response.raise_for_status()
             print(f"Webhook sent successfully for {merchant_name}: {response.status_code}")
             
+    def send_aura_webhook(self, aura_name, rarity, biome_message):
+        webhook_url = self.config.get("webhook_url")
+        if not webhook_url:
+            print("Webhook URL is missing/not included in the config.json")
+            return
+        
+        send_minimum = int(self.config.get("send_minimum", "10000"))
+        ping_minimum = int(self.config.get("ping_minimum", "100000"))
+    
+        # aura webhook color based from rarity
+        rarity_value = int(rarity.replace(',', ''))
+        if rarity_value >= send_minimum:
+            if 99000 <= rarity_value < 1000000:
+                color = 0x3dd3e0  # 99k - 999k
+            elif 1000000 <= rarity_value < 10000000:
+                color = 0xff73ec  # 1m - 9m
+            elif 10000000 <= rarity_value < 99000000:
+                color = 0x2d30f7  # 10m - 99m
+            elif 99000000 <= rarity_value < 1000000000:
+                color = 0xed2f59  # 99m - 999m
+            else:
+                color = 0x00ff00
+
+        description = f"## {time.strftime("[%H:%M:%S]")} \n ## Aura found/equipped: {aura_name} in 1/{rarity} {biome_message}"
+
+        payload = {
+            "embeds": [
+                {
+                    "title": "⭐ Aura Detection ⭐",
+                    "description": description,
+                    "color": color,
+                    "footer": {
+                        "text": "Noteab's Macro (v1.5.4-patch1)",
+                    }
+                }
+            ]
+        }
+
+
+        if rarity_value >= ping_minimum:
+            aura_user_id = self.config.get("aura_user_id", "")
+            if aura_user_id:
+                payload["content"] = f"<@{aura_user_id}> "
+            else:
+                payload["content"] = description
+            
+        try:
+            response = requests.post(webhook_url, json=payload)
+            response.raise_for_status()
+            print(f"Aura webhook sent for {aura_name}")
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to send aura webhook: {e}")
+                   
     def send_webhook_status(self, status, color=None):
         try:
             webhook_url = self.config.get("webhook_url")
@@ -1641,7 +1845,7 @@ class BiomePresence():
                 "description": f"## [{time.strftime('%H:%M:%S')}] {status}",
                 "color": embed_color,
                 "footer": {
-                    "text": "Noteab's Macro (v1.5.3)",
+                    "text": "Noteab's Macro (v1.5.4-patch1)",
                 }
             }]
             response = requests.post(
@@ -1720,6 +1924,8 @@ class BiomePresence():
             if not self.detection_running: return
             if enabled:
                 print(f"Using {buff} x{amount}")
+                
+                ui_key = self.config.get("ui_navigation_key", "|")
 
                 for _ in range(3):
                     if not self.detection_running:
@@ -1749,9 +1955,9 @@ class BiomePresence():
                 time.sleep(0.78)
 
                 # Disable and re-enable UI navigation
-                keyboard.press_and_release('|')
+                keyboard.press_and_release(ui_key)
                 time.sleep(0.14)
-                keyboard.press_and_release('|')
+                keyboard.press_and_release(ui_key)
 
                 for key in second_navigation_sequence:
                     if not self.detection_running:
@@ -1788,8 +1994,7 @@ class BiomePresence():
                     keyboard.press_and_release(key)
                     time.sleep(0.16)
 
-                keyboard.press_and_release('|')
-
+                keyboard.press_and_release(ui_key)
 
 try:
     biome_presence = BiomePresence()
