@@ -1,14 +1,15 @@
-import json, requests, time, os, threading, re, webbrowser, random, keyboard, pyautogui
+import json, requests, time, os, threading, re, webbrowser, random, keyboard, webbrowser, pyautogui, pytesseract
 import pyscreenrec
 import pygetwindow as gw
+import win32com.client
 from tkinter import ttk
-from tkinter import messagebox
-from PIL import Image, ImageTk
+from tkinter import messagebox, filedialog
+from PIL import Image, ImageTk, ImageGrab
 from datetime import datetime, timedelta
 
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
-
+    
 class SnippingWidget:
     def __init__(self, root, config_key=None, callback=None):
         self.root = root
@@ -42,7 +43,7 @@ class SnippingWidget:
         self.end_x, self.end_y = event.x, event.y
         self.canvas.delete("selection_rect")
         self.canvas.create_rectangle(self.begin_x, self.begin_y, self.end_x, self.end_y,
-                                      outline="black", width=2, tag="selection_rect")
+                                      outline="white", width=2, tag="selection_rect")
 
     def on_mouse_release(self, event):
         self.end_x = event.x
@@ -65,6 +66,7 @@ class SnippingWidget:
 class BiomePresence():
     def __init__(self):
         self.logs_dir = os.path.join(os.getenv('LOCALAPPDATA'), 'Roblox', 'logs')
+        self.ahk = None
         self.config = self.load_config()
         
         self.biome_data = {
@@ -95,6 +97,7 @@ class BiomePresence():
         #item use
         self.last_br_time = datetime.min
         self.last_sc_time = datetime.min
+        self.last_mt_time = datetime.min
         
         # Buff variables
         self.buff_vars = {}
@@ -103,14 +106,12 @@ class BiomePresence():
         # start gui
         self.variables = {}
         self.init_gui()
-        
-       
        
     def load_logs(self):
         if os.path.exists('macro_logs.txt'):
             with open('macro_logs.txt', 'r') as file:
                 lines = file.read().splitlines()
-                return lines[-100:]
+                return lines
         return []
 
     def save_logs(self):
@@ -147,7 +148,25 @@ class BiomePresence():
                 buff: (self.buff_vars[buff].get(), int(self.buff_amount_vars[buff].get()))
                 for buff in self.buff_vars
             },
-            "selected_theme": self.root.style.theme.name
+            "selected_theme": self.root.style.theme.name,
+            "dont_ask_for_update": self.config.get("dont_ask_for_update", False),
+            "ui_navigation_key": self.ui_navigation_key_var.get(),
+
+            "merchant_teleporter": self.mt_var.get(),
+            "mt_duration": self.mt_duration_var.get(),
+            "Mari_Items": self.config.get("Mari_Items", {}),
+            "Jester_Items": self.config.get("Jester_Items", {}),
+            "ping_mari":self.ping_mari_var.get(),
+            "mari_user_id": self.mari_user_id_var.get(),
+            "ping_jester": self.ping_jester_var.get(),
+            "jester_user_id": self.jester_user_id_var.get(),
+            "merchant_open_button": self.config.get("merchant_open_button", [0, 0]),
+            "merchant_dialogue_box": self.config.get("merchant_dialogue_box", [0, 0]),
+            "purchase_amount_button": self.config.get("purchase_amount_button", [0, 0]),
+            "purchase_button": self.config.get("purchase_button", [0, 0]),
+            "first_item_slot_pos": self.config.get("first_item_slot_pos", [0, 0]),
+            "merchant_name_ocr_pos": self.config.get("merchant_name_ocr_pos", [0, 0, 0, 0]),
+            "item_name_ocr_pos": self.config.get("item_name_ocr_pos", [0, 0, 0, 0])
         })
 
         if not config["auto_buff_glitched"]:
@@ -179,8 +198,8 @@ class BiomePresence():
         icon_path = os.path.join(abslt_path, "NoteabBiomeTracker.ico")
         
         self.root = ttk.Window(themename=selected_theme)
-        self.root.title("Noteab's Biome Macro (v1.5.2) (Idle)")
-        self.root.geometry("620x310")
+        self.root.title("Noteab's Biome Macro (v1.5.3) (Idle)")
+        self.root.geometry("620x360")
         self.root.iconbitmap(default=icon_path)
         self.variables = {biome: ttk.StringVar(master=self.root, value=self.config.get("biome_notifier", {}).get(biome, "None"))
                         for biome in self.biome_data}
@@ -195,18 +214,22 @@ class BiomePresence():
 
         webhook_frame = ttk.Frame(notebook)
         misc_frame = ttk.Frame(notebook)
+        merchant_frame = ttk.Frame(notebook)
         credits_frame = ttk.Frame(notebook)
         stats_frame = ttk.Frame(notebook)
 
         notebook.add(webhook_frame, text='Webhook')
         notebook.add(misc_frame, text='Misc')
+        notebook.add(merchant_frame, text='Merchant')
         notebook.add(stats_frame, text='Stats')
         notebook.add(credits_frame, text='Credits')
 
         self.create_webhook_tab(webhook_frame)
         self.create_misc_tab(misc_frame)
-        self.create_credit_tab(credits_frame)
+        self.create_merchant_tab(merchant_frame)
         self.create_stats_tab(stats_frame)
+        self.create_credit_tab(credits_frame)
+        
 
         button_frame = ttk.Frame(self.root)
         button_frame.pack(pady=10)
@@ -226,6 +249,8 @@ class BiomePresence():
 
         keyboard.add_hotkey('F1', self.start_detection)
         keyboard.add_hotkey('F2', self.stop_detection)
+        
+        self.check_for_updates()
         self.root.mainloop()
 
     def update_theme(self, theme_name):
@@ -233,6 +258,49 @@ class BiomePresence():
         self.config["selected_theme"] = theme_name
         self.save_config()
 
+    def check_for_updates(self):
+        current_version = "v1.5.3"
+        dont_ask_again = self.config.get("dont_ask_for_update", False)
+        
+        if dont_ask_again:
+            return
+        
+        try:
+            response = requests.get("https://api.github.com/repos/noteab/Sol-Biome-Tracker/releases/latest")
+            response.raise_for_status()
+            latest_release = response.json()
+            latest_version = latest_release['tag_name']
+            
+            if latest_version != current_version:
+                message = f"New update of this macro {latest_version} is available. Do you want to download the newest version?"
+                if messagebox.askyesno("Update Available!!", message):
+                    download_url = latest_release['assets'][0]['browser_download_url']
+                    self.download_update(download_url)
+                else:
+                    if messagebox.askyesno("Don't Ask Again", "Would you like to stop receiving update notifications?"):
+                        self.config["dont_ask_for_update"] = True
+                        self.save_config()
+                            
+        except requests.RequestException as e:
+            print(f"Failed to fetch the latest version from GitHub: {e}")
+            
+    def download_update(self, download_url):
+        try:
+            zip_filename = os.path.basename(download_url)
+            save_path = filedialog.asksaveasfilename(defaultextension=".zip", initialfile=zip_filename, title="Save As")
+            
+            if not save_path: return
+            
+            response = requests.get(download_url)
+            response.raise_for_status()
+        
+            with open(save_path, 'wb') as file:
+                file.write(response.content)
+            
+            messagebox.showinfo("Download Complete", f"The latest version has been downloaded as {save_path}. Make sure to turn off antivirus and extract it manually.")
+        except requests.RequestException as e:
+            print(f"Failed to download the update: {e}")
+    
     def open_biome_settings(self):
         settings_window = ttk.Toplevel(self.root)
         settings_window.title("Biome Settings")
@@ -396,14 +464,331 @@ class BiomePresence():
         sc_duration_entry.grid(row=4, column=2, padx=5)
         sc_duration_entry.bind("<FocusOut>", lambda event: self.save_config())
 
+        self.mt_var = ttk.BooleanVar(value=self.config.get("merchant_teleporter", False))
+        mt_check = ttk.Checkbutton(
+            hp2_frame, 
+            text="Merchant Teleporter (Auto Merchant)", 
+            variable=self.mt_var,
+            command=self.save_config
+        )
+        mt_check.grid(row=5, column=0, padx=5, sticky="w")
+
+        ttk.Label(hp2_frame, text="Usage Duration (minutes):").grid(row=5, column=1, padx=5)
+        self.mt_duration_var = ttk.StringVar(value=self.config.get("mt_duration", ""))
+        mt_duration_entry = ttk.Entry(hp2_frame, textvariable=self.mt_duration_var, width=10)
+        mt_duration_entry.grid(row=5, column=2, padx=5)
+        mt_duration_entry.bind("<FocusOut>", lambda event: self.save_config())
+
+        ttk.Label(hp2_frame, text="Custom UI Navigation Key:").grid(row=7, column=0, padx=5, sticky="w")
+        self.ui_navigation_key_var = ttk.StringVar(value=self.config.get("ui_navigation_key", "|"))
+        ui_navigation_key_entry = ttk.Entry(hp2_frame, textvariable=self.ui_navigation_key_var, width=10)
+        ui_navigation_key_entry.grid(row=7, column=1, padx=5)
+        ui_navigation_key_entry.bind("<FocusOut>", lambda event: self.save_config())
+    
         # Reminder Text
         reminder_label = ttk.Label(
             hp2_frame, 
             text="Make sure to enable UI Navigation in Roblox settings, turn off shiftlock is recommended",
             foreground="red"
         )
-        reminder_label.grid(row=5, column=0, columnspan=3, padx=5, pady=8, sticky="w")
+        reminder_label.grid(row=6, column=0, columnspan=3, padx=5, pady=8, sticky="w")
+
+    def create_merchant_tab(self, frame):
+        mari_frame = ttk.LabelFrame(frame, text="Mari")
+        mari_frame.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
+        mari_button = ttk.Button(mari_frame, text="Mari Item Settings", command=self.open_mari_settings)
+        mari_button.pack(padx=3, pady=3)
         
+        jester_frame = ttk.LabelFrame(frame, text="Jester")
+        jester_frame.grid(row=0, column=1, padx=5, pady=5, sticky="nsew")
+        jester_button = ttk.Button(jester_frame, text="Jester Item Settings", command=self.open_jester_settings)
+        jester_button.pack(padx=3, pady=3)
+
+        calibration_button = ttk.Button(frame, text="Merchant Calibrations", command=self.open_merchant_calibration_window)
+        calibration_button.grid(row=1, column=0, padx=5, pady=3, sticky="w")
+
+        # Ping Mari
+        self.ping_mari_var = ttk.BooleanVar(value=self.config.get("ping_mari", False))
+        ping_mari_check = ttk.Checkbutton(
+            frame, text="Ping if Mari found? (Custom Ping UserID/RoleID: &roleid)",
+            variable=self.ping_mari_var, command=self.save_config)
+        ping_mari_check.grid(row=2, column=0, padx=5, pady=3, sticky="w")
+
+        self.mari_user_id_var = ttk.StringVar(value=self.config.get("mari_user_id", ""))
+        mari_user_id_entry = ttk.Entry(frame, textvariable=self.mari_user_id_var, width=15)
+        mari_user_id_entry.grid(row=2, column=1, padx=0, pady=3, sticky="w")
+        mari_user_id_entry.bind("<FocusOut>", lambda event: self.save_config())
+
+        mari_label = ttk.Label(frame, text="")
+        mari_label.grid(row=2, column=2, padx=5, pady=3, sticky="w")
+
+        # Ping Jester
+        self.ping_jester_var = ttk.BooleanVar(value=self.config.get("ping_jester", False))
+        ping_jester_check = ttk.Checkbutton(
+            frame, text="Ping if Jester found? (Custom Ping UserID/RoleID: &roleid)",
+            variable=self.ping_jester_var, command=self.save_config)
+        ping_jester_check.grid(row=3, column=0, padx=5, pady=3, sticky="w")
+
+        self.jester_user_id_var = ttk.StringVar(value=self.config.get("jester_user_id", ""))
+        jester_user_id_entry = ttk.Entry(frame, textvariable=self.jester_user_id_var, width=15)
+        jester_user_id_entry.grid(row=3, column=1, padx=0, pady=3, sticky="w")
+        jester_user_id_entry.bind("<FocusOut>", lambda event: self.save_config())
+
+        jester_label = ttk.Label(frame, text="")
+        jester_label.grid(row=3, column=2, padx=5, pady=3, sticky="w")
+
+        # Required Package Frame
+        package_frame = ttk.LabelFrame(frame, text="Required Package For Auto Merchant")
+        package_frame.grid(row=4, column=0, padx=5, pady=5, sticky="nsew")
+
+        # Tesseract OCR Status
+        ocr_status = self.check_tesseract_ocr()
+        ocr_status_text = "Tesseract OCR Installed: Yes" if ocr_status else "Tesseract OCR Installed: No, click here to get OCR module"
+        ocr_status_label = ttk.Label(package_frame, text=ocr_status_text, foreground="light blue", cursor="hand2")
+        ocr_status_label.pack(anchor="w", padx=5, pady=3)
+        if not ocr_status:
+            ocr_status_label.bind("<Button-1>", lambda e: self.download_tesseract())
+
+        # AHK Status
+        ahk_status = self.check_ahk_path()
+        ahk_status_text = "AHK Installed: Yes" if ahk_status else "AHK Installed: No, click here to install AHK v1.1"
+        ahk_status_label = ttk.Label(package_frame, text=ahk_status_text, foreground="light blue", cursor="hand2")
+        ahk_status_label.pack(anchor="w", padx=5, pady=3)
+        if not ahk_status:
+            ahk_status_label.bind("<Button-1>", lambda e: self.download_ahk())
+
+        frame.grid_columnconfigure(0, weight=1)
+        frame.grid_columnconfigure(1, weight=1)
+        frame.grid_columnconfigure(2, weight=1)
+
+    def check_tesseract_ocr(self):
+        possible_paths = [
+            r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+            r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe'
+        ]
+        for path in possible_paths:
+            if os.path.exists(path):
+                pytesseract.pytesseract.tesseract_cmd = path
+                return True
+        return False
+    
+    def check_ahk_path(self):
+        try:
+            from ahk import AHK
+            possible_paths = [
+                r'C:\Program Files\AutoHotkey\AutoHotkey.exe',
+                r'C:\Program Files (x86)\AutoHotkey\AutoHotkey.exe'
+            ]
+            for path in possible_paths:
+                if os.path.exists(path):
+                    self.ahk = AHK(executable_path=path)
+                    return True
+        except ImportError:
+            return False
+        return False
+
+    def download_tesseract(self):
+        download_url = "https://github.com/tesseract-ocr/tesseract/releases/download/5.5.0/tesseract-ocr-w64-setup-5.5.0.20241111.exe"
+        try:
+            exe_filename = os.path.basename(download_url)
+            save_path = filedialog.asksaveasfilename(defaultextension=".exe", initialfile=exe_filename, title="Save As")
+            
+            if not save_path:
+                messagebox.showwarning("Download Cancelled", "No file path selected. Download cancelled.")
+                return
+            
+            response = requests.get(download_url)
+            response.raise_for_status()
+        
+            with open(save_path, 'wb') as file:
+                file.write(response.content)
+            
+            messagebox.showinfo("Download Complete", f"Tesseract installer has been downloaded as {save_path}. Please run the installer to complete the setup. \n \n After installed tesseract, restart the macro to let it check if your ocr module is ready!")
+        except requests.RequestException as e:
+            messagebox.showerror("Download Failed", f"Failed to download Tesseract: {e}")
+        except IOError as e:
+            messagebox.showerror("File Error", f"Failed to save the file: {e}")
+            
+    def download_ahk(self):
+        download_url = "https://www.autohotkey.com/download/ahk-install.exe"
+        try:
+            exe_filename = os.path.basename(download_url)
+            save_path = filedialog.asksaveasfilename(defaultextension=".exe", initialfile=exe_filename, title="Save As")
+            
+            if not save_path:
+                messagebox.showwarning("Download Cancelled", "No file path selected. Download cancelled.")
+                return
+            
+            response = requests.get(download_url)
+            response.raise_for_status()
+        
+            with open(save_path, 'wb') as file:
+                file.write(response.content)
+            
+            messagebox.showinfo("Download Complete", f"AutoHotkey installer has been downloaded as {save_path}. Please run the installer to complete the setup.")
+        except requests.RequestException as e:
+            messagebox.showerror("Download Failed", f"Failed to download AutoHotkey: {e}")
+        except IOError as e:
+            messagebox.showerror("File Error", f"Failed to save the file: {e}")
+        
+    def open_merchant_calibration_window(self):
+        calibration_window = ttk.Toplevel(self.root)
+        calibration_window.title("Merchant Calibration")
+        calibration_window.geometry("650x345")
+
+        positions = [
+            ("Merchant Open Button", "merchant_open_button"),
+            ("Merchant Dialogue Box", "merchant_dialogue_box"),
+            ("Purchase Amount Button", "purchase_amount_button"),
+            ("Purchase Button", "purchase_button"),
+            ("First Item Slot Position", "first_item_slot_pos"),
+            ("Merchant Name OCR Position", "merchant_name_ocr_pos"),
+            ("Item Name OCR Position", "item_name_ocr_pos")
+        ]
+
+        self.coord_vars = {}
+
+        for i, (label_text, config_key) in enumerate(positions):
+            if "ocr" in config_key:
+                label = ttk.Label(calibration_window, text=f"{label_text} (X, Y, W, H):")
+                label.grid(row=i, column=0, padx=5, pady=5, sticky="w")
+
+                x_var = ttk.IntVar(value=self.config.get(config_key, [0, 0, 0, 0])[0])
+                y_var = ttk.IntVar(value=self.config.get(config_key, [0, 0, 0, 0])[1])
+                w_var = ttk.IntVar(value=self.config.get(config_key, [0, 0, 0, 0])[2])
+                h_var = ttk.IntVar(value=self.config.get(config_key, [0, 0, 0, 0])[3])
+                self.coord_vars[config_key] = (x_var, y_var, w_var, h_var)
+
+                ttk.Entry(calibration_window, textvariable=x_var, width=6).grid(row=i, column=1, padx=5, pady=5)
+                ttk.Entry(calibration_window, textvariable=y_var, width=6).grid(row=i, column=2, padx=5, pady=5)
+                ttk.Entry(calibration_window, textvariable=w_var, width=6).grid(row=i, column=3, padx=5, pady=5)
+                ttk.Entry(calibration_window, textvariable=h_var, width=6).grid(row=i, column=4, padx=5, pady=5)
+
+                select_button = ttk.Button(
+                    calibration_window, text="Select Region",
+                    command=lambda key=config_key: self.merchant_snipping(key)
+                )
+            else:
+                label = ttk.Label(calibration_window, text=f"{label_text} (X, Y):")
+                label.grid(row=i, column=0, padx=5, pady=5, sticky="w")
+
+                x_var = ttk.IntVar(value=self.config.get(config_key, [0, 0])[0])
+                y_var = ttk.IntVar(value=self.config.get(config_key, [0, 0])[1])
+                self.coord_vars[config_key] = (x_var, y_var)
+
+                ttk.Entry(calibration_window, textvariable=x_var, width=6).grid(row=i, column=1, padx=5, pady=5)
+                ttk.Entry(calibration_window, textvariable=y_var, width=6).grid(row=i, column=2, padx=5, pady=5)
+
+                select_button = ttk.Button(
+                    calibration_window, text="Select Pos",
+                    command=lambda key=config_key: self.start_capture_thread(key, self.coord_vars)
+                )
+
+            select_button.grid(row=i, column=5, padx=5, pady=5)
+
+        save_button = ttk.Button(calibration_window, text="Save Calibration", command=lambda: self.save_merchant_coordinates(calibration_window))
+        save_button.grid(row=len(positions), column=0, columnspan=6, pady=10)
+        
+    def merchant_snipping(self, config_key):
+        def on_region_selected(region):
+            x, y, w, h = region
+            x_var, y_var, w_var, h_var = self.coord_vars[config_key]
+            x_var.set(x)
+            y_var.set(y)
+            w_var.set(w)
+            h_var.set(h)
+
+        snipping_tool = SnippingWidget(self.root, config_key=config_key, callback=on_region_selected)
+        snipping_tool.start()
+    
+    def save_merchant_coordinates(self, calibration_window):
+        for config_key, vars in self.coord_vars.items():
+            if len(vars) == 4:
+                self.config[config_key] = [var.get() for var in vars]
+            else:
+                self.config[config_key] = [vars[0].get(), vars[1].get()]
+        self.save_config()
+        calibration_window.destroy()
+    
+    def open_mari_settings(self):
+        mari_window = ttk.Toplevel(self.root)
+        mari_window.title("Mari Items")
+
+        items = [
+            "Void Coin", "Lucky Penny", "Mixed Potion", "Lucky Potion",
+            "Lucky Potion L", "Lucky Potion XL", "Speed Potion",
+            "Speed Potion L", "Speed Potion XL", "Gear A", "Gear B"
+        ]
+
+        item_frame = ttk.Frame(mari_window)
+        item_frame.pack(padx=10, pady=10, fill='x')
+        ttk.Label(item_frame, text="Item Name").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        ttk.Label(item_frame, text="Amount").grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        
+        self.mari_items_vars = {}
+        self.mari_items_amounts = {}
+        saved_mari_items = self.config.get("Mari_Items", {})
+
+        for i, item in enumerate(items, start=1):
+            var = ttk.BooleanVar(value=saved_mari_items.get(item, [False, "1"])[0])
+            self.mari_items_vars[item] = var
+            ttk.Checkbutton(item_frame, text=item, variable=var).grid(row=i, column=0, sticky="w", padx=5, pady=2)
+            
+            amount_var = ttk.StringVar(value=str(saved_mari_items.get(item, [False, "1"])[1]))
+            self.mari_items_amounts[item] = amount_var
+            ttk.Entry(item_frame, textvariable=amount_var, width=5).grid(row=i, column=1, padx=5, pady=2)
+
+        save_button = ttk.Button(mari_window, text="Save Selections", command=self.save_mari_selections)
+        save_button.pack(pady=10)
+
+    def save_mari_selections(self):
+        mari_items = {
+            item: [var.get(), int(self.mari_items_amounts[item].get())]
+            for item, var in self.mari_items_vars.items()
+        }
+        self.config["Mari_Items"] = mari_items
+        self.save_config()
+    
+    def open_jester_settings(self):
+        jester_window = ttk.Toplevel(self.root)
+        jester_window.title("Jester Items")
+
+        items = [
+            "Oblivion Potion", "Heavenly Potion", "Rune of Everything",
+            "Rune of Nothing", "Rune Of Corruption", "Rune Of Hell", "Rune of Galaxy",
+            "Rune of Rainstorm", "Rune of Frost", "Rune of Wind", "Strange Potion", 
+            "Stella's Candle", "Merchant Tracker", "Random Potion Sack"
+        ]
+
+        item_frame = ttk.Frame(jester_window)
+        item_frame.pack(padx=10, pady=10, fill='x')
+        ttk.Label(item_frame, text="Item Name").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        ttk.Label(item_frame, text="Amount").grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        
+        self.jester_items_vars = {}
+        self.jester_items_amounts = {}
+        saved_jester_items = self.config.get("Jester_Items", {})
+
+        for i, item in enumerate(items, start=1):
+            var = ttk.BooleanVar(value=saved_jester_items.get(item, [False, "1"])[0])
+            self.jester_items_vars[item] = var
+            ttk.Checkbutton(item_frame, text=item, variable=var).grid(row=i, column=0, sticky="w", padx=5, pady=2)
+            
+            amount_var = ttk.StringVar(value=str(saved_jester_items.get(item, [False, "1"])[1]))
+            self.jester_items_amounts[item] = amount_var
+            ttk.Entry(item_frame, textvariable=amount_var, width=5).grid(row=i, column=1, padx=5, pady=2)
+
+        save_button = ttk.Button(jester_window, text="Save Selections", command=self.save_jester_selections)
+        save_button.pack(pady=10)
+
+    def save_jester_selections(self):
+        jester_items = {
+            item: [var.get(), int(self.jester_items_amounts[item].get())]
+            for item, var in self.jester_items_vars.items()
+        }
+        self.config["Jester_Items"] = jester_items
+        self.save_config()
+    
     def create_stats_tab(self, frame):
         self.stats_labels = {}
         biomes = list(self.biome_data.keys())
@@ -534,31 +919,53 @@ class BiomePresence():
             label.config(text=f"{biome}: {self.biome_counts[biome]}")
 
         self.total_biomes_label.config(text=f"Total Biomes Found: {total_biomes}", foreground="light green")
-        self.session_label.config(text=f"Running Session: {str(self.get_total_session_time()).split('.')[0]}")
+        self.session_label.config(text=f"Running Session: {self.get_total_session_time()}")
         self.save_config()
         
 
     def get_total_session_time(self):
         if self.start_time:
             elapsed_time = datetime.now() - self.start_time
-            saved_time = timedelta(seconds=self.saved_session)
-            total_time = elapsed_time + saved_time
+            total_seconds = int(elapsed_time.total_seconds()) + self.saved_session
         else:
-            total_time = timedelta(seconds=self.saved_session)
+            total_seconds = self.saved_session
 
-        days = total_time.days
-        hours, remainder = divmod(total_time.seconds, 3600)
+        days, remainder = divmod(total_seconds, 86400)
+        hours, remainder = divmod(remainder, 3600)
         minutes, seconds = divmod(remainder, 60)
-        return f"{days:02}:{hours:02}:{minutes:02}:{seconds:02}"
-    
+
+        # Format time string
+        if days > 0:
+            return f"{days}d {hours:02}:{minutes:02}:{seconds:02}"
+        return f"{hours:02}:{minutes:02}:{seconds:02}"
+
     def parse_session_time(self, session_time_str):
-        parts = session_time_str.split(':')
-        if len(parts) == 3:
-            h, m, s = map(int, parts)
-            d = 0
-        else:
-            d, h, m, s = map(int, parts)
-        return d * 86400 + h * 3600 + m * 60 + s
+        try:
+            parts = session_time_str.split(":")
+            if len(parts) == 4:  # Format: days:hours:minutes:seconds
+                days, hours, minutes, seconds = map(int, parts)
+            elif len(parts) == 3:  # Format: hours:minutes:seconds
+                days, hours, minutes, seconds = 0, *map(int, parts)
+            else:
+                raise ValueError("Invalid session time format")
+
+            return days * 86400 + hours * 3600 + minutes * 60 + seconds
+        except Exception as e:
+            print(f"Error parsing session time: {e}")
+            return 0
+    
+    def update_session_time(self):
+        if self.start_time:
+            elapsed_time = datetime.now() - self.start_time
+            total_seconds = int(elapsed_time.total_seconds()) + self.saved_session
+
+            days, remainder = divmod(total_seconds, 86400)
+            hours, remainder = divmod(remainder, 3600)
+            minutes, seconds = divmod(remainder, 60)
+
+            # Format the time string
+            session_time_str = f"{days}d {hours:02}:{minutes:02}:{seconds:02}" if days > 0 else f"{hours:02}:{minutes:02}:{seconds:02}"
+            self.session_label.config(text=f"Running Session: {session_time_str}")
     
     def display_logs(self, logs=None):
         self.logs_text.config(state="normal")
@@ -575,8 +982,6 @@ class BiomePresence():
         
     def append_log(self, message):
         self.logs.append(message)
-        if len(self.logs) > 100:
-            self.logs.pop(0)
         self.display_logs()
         self.save_logs()
         self.logs_text.see(ttk.END)
@@ -673,15 +1078,20 @@ class BiomePresence():
             self.start_time = datetime.now()
             self.detection_thread = threading.Thread(target=self.biome_loop_check, daemon=True)
             self.detection_thread.start()
-            self.root.title("Noteab's Biome Macro (v1.5.2) (Running)")
+            self.root.title("Noteab's Biome Macro (v1.5.3) (Running)")
+            self.send_webhook_status("Macro started!", color=0x64ff5e)
             print("Biome detection started.")
 
     def stop_detection(self):
         if self.detection_running:
             self.detection_running = False
-            self.saved_session += (datetime.now() - self.start_time).total_seconds()
+
+            elapsed_time = int((datetime.now() - self.start_time).total_seconds())
+            self.saved_session += elapsed_time
+
             self.start_time = None
-            self.root.title("Noteab's Biome Macro (v1.5.2) (Stopped)")
+            self.root.title("Noteab's Biome Macro (v1.5.3) (Stopped)")
+            self.send_webhook_status("Macro stopped!", color=0xff0000)
             self.save_config()
             print("Biome detection stopped.")
     
@@ -797,6 +1207,11 @@ class BiomePresence():
             time.sleep(2)
         
     def auto_biome_change(self):
+        mt_cooldown = timedelta(minutes=int(self.mt_duration_var.get()))
+        if self.mt_var.get() and datetime.now() - self.last_mt_time >= mt_cooldown:
+            self.use_merchant_teleporter()
+            self.last_mt_time = datetime.now()
+            
         sc_cooldown = timedelta(minutes=int(self.sc_duration_var.get()))
         if self.sc_var.get() and datetime.now() - self.last_sc_time >= sc_cooldown:
             self.use_br_sc('strange controller')
@@ -806,10 +1221,14 @@ class BiomePresence():
         if self.br_var.get() and datetime.now() - self.last_br_time >= br_cooldown:
             self.use_br_sc('biome randomizer')
             self.last_br_time = datetime.now()
+            
+        
 
     def use_br_sc(self, item_name):
         if not self.detection_running: return
         time.sleep(1.3)
+        
+        ui_key = self.config.get("ui_navigation_key", "|")
         
         for _ in range(3):
             if not self.detection_running: return
@@ -819,7 +1238,7 @@ class BiomePresence():
         print(f"Using {item_name.capitalize()}")
 
         # Enable UI navigation
-        keyboard.press_and_release('|')
+        keyboard.press_and_release(ui_key)
         time.sleep(1.2)
 
         navigation_sequence = ['a', 'a', 'a', 'a', 'a', 'a', 'a', 'w', 'w']
@@ -830,21 +1249,21 @@ class BiomePresence():
         for key in navigation_sequence:
             if not self.detection_running: return
             keyboard.press_and_release(key)
-            time.sleep(0.13)
+            time.sleep(0.165)
 
         # Open the inventory menu
         keyboard.press_and_release('enter')
         time.sleep(1)
 
         # Disable and re-enable UI navigation
-        keyboard.press_and_release('|')
+        keyboard.press_and_release(ui_key)
         time.sleep(0.2)
-        keyboard.press_and_release('|')
+        keyboard.press_and_release(ui_key)
 
         for key in second_navigation_sequence:
             if not self.detection_running: return
             keyboard.press_and_release(key)
-            time.sleep(0.13)
+            time.sleep(0.165)
 
         # item name
         keyboard.write(item_name)
@@ -871,9 +1290,218 @@ class BiomePresence():
         for key in last_navigation_sequence:
             if not self.detection_running: return
             keyboard.press_and_release(key)
+            time.sleep(0.16)
+
+        keyboard.press_and_release(ui_key)
+    
+    def use_merchant_teleporter(self):
+        if not self.detection_running: return
+        time.sleep(1.3)
+        
+        ui_key = self.config.get("ui_navigation_key", "|")
+        
+        for _ in range(3):
+            if not self.detection_running: return
+            self.activate_roblox_window()
+            time.sleep(0.3)
+
+        keyboard.press_and_release(ui_key)
+        time.sleep(1.2)
+
+        navigation_sequence = ['a', 'a', 'a', 'a', 'a', 'a', 'a', 'w', 'w']
+        second_navigation_sequence = ['a', 's', 'enter', 's', 'enter']
+        third_navigation_sequence = ['s', 's', 's', 's', 's', 'w', 'w', 'enter', 'w', 'a', 'a', 'enter']
+        last_navigation_sequence = ['d', 'enter', 'a', 'a', 'enter']
+        after_merchant_sequence = ['a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a']
+
+        for key in navigation_sequence:
+            if not self.detection_running: return
+            keyboard.press_and_release(key)
+            time.sleep(0.165)
+
+        # Open the inventory menu
+        keyboard.press_and_release('enter')
+        time.sleep(1)
+
+        # Disable and re-enable UI navigation
+        keyboard.press_and_release(ui_key)
+        time.sleep(0.2)
+        keyboard.press_and_release(ui_key)
+
+        for key in second_navigation_sequence:
+            if not self.detection_running: return
+            keyboard.press_and_release(key)
+            time.sleep(0.165)
+
+
+        keyboard.write("teleport")
+        time.sleep(0.2)
+        keyboard.press_and_release('enter')
+
+        time.sleep(0.2)
+
+        for key in third_navigation_sequence:
+            if not self.detection_running: return
+            keyboard.press_and_release(key)
             time.sleep(0.15)
 
-        keyboard.press_and_release('|')
+        keyboard.press_and_release('ctrl+a')
+        time.sleep(0.1)
+        keyboard.press_and_release('backspace')
+        time.sleep(0.1)
+        keyboard.write('1')
+        time.sleep(0.1)
+        keyboard.press_and_release('enter')
+
+        time.sleep(0.15)
+
+        for key in last_navigation_sequence:
+            if not self.detection_running: return
+            keyboard.press_and_release(key)
+            time.sleep(0.16)
+
+        keyboard.press_and_release(ui_key)
+        
+        time.sleep(0.47)
+        self.Merchant_Handler()
+        time.sleep(0.33)
+        keyboard.press_and_release(ui_key)
+        time.sleep(0.17)
+        
+        for key in after_merchant_sequence:
+            if not self.detection_running: return
+            keyboard.press_and_release(key)
+            time.sleep(0.12)
+            
+        time.sleep(0.21)
+        keyboard.press_and_release('enter')
+        time.sleep(0.21)
+        keyboard.press_and_release('enter')
+        time.sleep(0.15)
+        keyboard.press_and_release(ui_key)
+        time.sleep(0.15)
+        
+    def Merchant_Handler(self):
+        merchant_name_ocr_pos = self.config["merchant_name_ocr_pos"]
+        merchant_open_button = self.config["merchant_open_button"]
+        first_item_slot_pos = self.config["first_item_slot_pos"]
+        item_name_ocr_pos = self.config["item_name_ocr_pos"]
+        merchant_dialogue_box = self.config["merchant_dialogue_box"]
+        
+        merchant_name = ""
+        ocrMisdetect_Key = {
+            "heovenly potion": "heavenly potion",
+            "rune of goloxy": "rune of galaxy",
+            "rune of roinstorm": "rune of rainstorm",
+            "stronge potion": "strange potion",
+            "stello's condle": "stella's candle",
+            "merchont trocker": "merchant tracker",
+            "rondom potion sock": "random potion sack",
+            "geor a": "gear a",
+            "geor b": "gear b"
+        }
+        
+        if not hasattr(self, 'last_merchant_interaction'):
+            self.last_merchant_interaction = 0
+            
+        merchant_cooldown_time = 190
+        current_time = time.time()
+        
+        if current_time - self.last_merchant_interaction < merchant_cooldown_time: return
+        
+        for _ in range(4):
+            self.ahk.send_input("e")
+            time.sleep(0.3)
+            
+        self.ahk_hold_left_click(merchant_dialogue_box[0], merchant_dialogue_box[1], holdTime=2500)
+            
+        for _ in range(5):
+            if not self.detection_running: return
+            
+            x, y, w, h = merchant_name_ocr_pos
+            screenshot = pyautogui.screenshot(region=(x, y, w, h))
+            merchant_name_text = pytesseract.image_to_string(screenshot, config='--psm 6').strip()
+            if any(name in merchant_name_text for name in ["Mari", "Mori", "Marl", "Mar1", "MarI", "Mar!", "Maori"]):
+                merchant_name = "Mari"
+                print("[Merchant Detection]: Mari name found!")
+                break
+            elif "Jester" in merchant_name_text:
+                merchant_name = "Jester"
+                print("[Merchant Detection]: Jester name found!")
+                break
+
+            time.sleep(0.35)
+
+        if merchant_name:
+            print(f"Opening merchant interface for {merchant_name}")
+            
+            x, y = merchant_open_button
+            self.ahk.click(x, y, button="left", coord_mode="Screen", click_count=3)
+            time.sleep(0.73)
+            
+            
+            screenshot_dir = os.path.join(os.getcwd(), "images")
+            os.makedirs(screenshot_dir, exist_ok=True)
+            
+            item_screenshot = pyautogui.screenshot()
+            screenshot_path = os.path.join(screenshot_dir, "merchant_screenshot.png")
+            item_screenshot.save(screenshot_path)
+            
+            self.send_merchant_webhook(merchant_name, screenshot_path)
+            
+
+            auto_buy_items = self.config.get(f"{merchant_name}_Items", {})
+            if not auto_buy_items:
+                return
+
+            purchased_items = set()
+
+            # Loop through item slots
+            for slot_index in range(5):
+                if not self.detection_running: return
+                
+                x, y = first_item_slot_pos
+                slot_x = x + (slot_index * 185)
+                self.ahk.click(slot_x, y, button="left", coord_mode="Screen", click_count=2)
+                time.sleep(0.35)
+
+                # OCR - item name
+                x, y, w, h = item_name_ocr_pos
+                screenshot = pyautogui.screenshot(region=(x, y, w, h))
+                item_text = pytesseract.image_to_string(screenshot, config='--psm 6').strip().lower()
+                
+                self.append_log(f"[Merchant Detection] Detected item text {merchant_name}: {item_text}")
+                 
+                corrected_item_name = item_text.split('|')[0].strip()
+                for misdetect, correct in ocrMisdetect_Key.items():
+                    if misdetect in corrected_item_name:
+                        corrected_item_name = correct
+                        print(f"Corrected OCR misdetection: '{item_text}' -> '{correct}'")
+                        break
+
+                print(f"Detected item text: {item_text} | Corrected: {corrected_item_name}")
+                
+                for item_name, (enabled, quantity) in auto_buy_items.items():
+                    if enabled and corrected_item_name == item_name.lower() and item_name not in purchased_items:
+                        print(f"Item '{item_name}' found. Proceeding to buy {quantity}.")
+                        
+                        purchase_amount_button = self.config["purchase_amount_button"]
+                        purchase_button = self.config["purchase_button"]
+
+                        self.ahk.click(*purchase_amount_button, button="left", coord_mode="Screen")
+                        self.ahk.send_input(str(quantity))
+                        time.sleep(0.25)
+
+                        self.ahk.click(*purchase_button, button="left", coord_mode="Screen")
+                        time.sleep(0.75)
+                        self.ahk_hold_left_click(merchant_dialogue_box[0], merchant_dialogue_box[1], holdTime=2130)
+                        purchased_items.add(item_name)
+                        break
+                                
+            # Update last merchant autobuy
+            self.last_merchant_interaction = current_time
+        else:
+            print("No merchant detected.")
             
     def record_screen(self, duration=10, fps=10):
         if not self.config.get("auto_record", False):
@@ -893,16 +1521,6 @@ class BiomePresence():
         recorder.stop_recording()
         print(f"Screen recording saved as {filename}")
     
-    def update_session_time(self):
-        if self.start_time:
-            elapsed_time = datetime.now() - self.start_time
-            total_seconds = int(elapsed_time.total_seconds()) + self.saved_session
-            days, remainder = divmod(total_seconds, 86400)
-            hours, remainder = divmod(remainder, 3600)
-            minutes, seconds = divmod(remainder, 60)
-            session_time_str = f"{days:02}:{hours:02}:{minutes:02}:{seconds:02}"
-            self.session_label.config(text=f"Running Session: {session_time_str}")
-
         
     def send_webhook(self, biome, message_type, user_info):
         webhook_url = self.config.get("webhook_url")
@@ -961,17 +1579,142 @@ class BiomePresence():
             
         except requests.exceptions.RequestException as e:
             print(f"Failed to send webhook: {e}")
+    
+    def send_merchant_webhook(self, merchant_name, screenshot_path):
+        webhook_url = self.config.get("webhook_url")
+        
+        if not webhook_url:
+            print("Webhook URL is missing/not included in the config.json")
+            return
+
+        merchant_thumbnails = {
+            "Mari": "https://static.wikia.nocookie.net/sol-rng/images/d/df/Mari_cropped.png/revision/latest?cb=20241015111527",
+            "Jester": "https://static.wikia.nocookie.net/sol-rng/images/d/db/Headshot_of_Jester.png/revision/latest?cb=20240630142936"
+        }
+
+
+        if merchant_name == "Mari":
+            ping_id = self.config.get("mari_user_id", "")
+        elif merchant_name == "Jester":
+            ping_id = self.config.get("jester_user_id", "")
+        else:
+            ping_id = ""
+
+        content = f"<@{ping_id}>" if ping_id else ""
+        ps_link = self.config.get("private_server_link", "")
+
+        embeds = [{
+            "title": f"{merchant_name} Detected!",
+            "description": f"{merchant_name} has been detected on your screen.\n**Item screenshot**\n \nMerchant PS Link: {ps_link}",
+            "color": 11753 if merchant_name == "Mari" else 8595632,
+            "image": {"url": f"attachment://{os.path.basename(screenshot_path)}"},
+            "thumbnail": {"url": merchant_thumbnails.get(merchant_name, "")}
+        }]
+
+        with open(screenshot_path, "rb") as image_file:
+            files = {"file": (os.path.basename(screenshot_path), image_file, "image/png")}
+            response = requests.post(
+                webhook_url,
+                data={
+                    "payload_json": json.dumps({
+                        "content": content,
+                        "embeds": embeds
+                    })
+                },
+                files=files
+            )
+            response.raise_for_status()
+            print(f"Webhook sent successfully for {merchant_name}: {response.status_code}")
             
-    def activate_roblox_window(self):
+    def send_webhook_status(self, status, color=None):
         try:
-            roblox_window = next(win for win in gw.getAllWindows() if 'Roblox' in win.title)
+            webhook_url = self.config.get("webhook_url")
+            if not webhook_url:
+                print("Webhook URL is missing/not included in the config.json")
+                return
             
-            if roblox_window:
+            default_color = 3066993 if "started" in status.lower() else 15158332
+            embed_color = color if color is not None else default_color
+            
+            embeds = [{
+                "title": "== 🌟 Macro Status 🌟 ==",
+                "description": f"## [{time.strftime('%H:%M:%S')}] {status}",
+                "color": embed_color,
+                "footer": {
+                    "text": "Noteab's Macro (v1.5.3)",
+                }
+            }]
+            response = requests.post(
+                webhook_url,
+                data={"payload_json": json.dumps({"embeds": embeds})}
+            )
+            response.raise_for_status()
+
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to send webhook: {e}")
+        except Exception as e:
+            print(f"An error occurred in webhook_status: {e}")
+        
+    def activate_roblox_window(self):
+        windows = gw.getAllTitles()
+        roblox_window = None
+        
+        for window in windows:
+            if "Roblox" in window:
+                roblox_window = gw.getWindowsWithTitle(window)[0]
+                break
+
+        if roblox_window:
+            try:
                 roblox_window.activate()
-                time.sleep(0.3)
-        except StopIteration:
+            except Exception as e:
+                print(f"Failed to activate window: {e}")
+        else:
             print("Roblox window not found.")
 
+    def ahk_scroll_up(self, lines=15):
+        if self.ahk:
+            self.ahk.run_script(f"""
+                Loop {lines} {{
+                    Send, {{WheelUp}}
+                    Sleep, 10
+                }}
+            """)
+
+    def ahk_scroll_down(self, lines=15):
+        if self.ahk:
+            self.ahk.run_script(f"""
+                Loop {lines} {{
+                    Send, {{WheelDown}}
+                    Sleep, 10
+                }}
+            """)
+
+    def ahk_hold_left_click(self, posX, posY, holdTime=3300):
+        if self.ahk:
+            self.ahk.run_script(f"""
+                MouseMove, {posX}, {posY}
+                Sleep, 250
+
+                if !GetKeyState("LButton", "P")
+                {{
+                    Click Down
+                }}
+
+                totalSleepTime := 0
+                interval := 50
+                while (totalSleepTime < {holdTime}) {{
+                    Sleep, %interval%
+                    totalSleepTime += interval
+                    if !GetKeyState("LButton", "P") 
+                    {{
+                        Click Down
+                    }}
+                }}
+
+                Click Up
+            """)
+        
     def auto_pop_buffs(self):
         for buff, (enabled, amount) in self.config.get("auto_buff_glitched", {}).items():
             if not self.detection_running: return
