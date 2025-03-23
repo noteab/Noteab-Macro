@@ -1481,7 +1481,7 @@ class BiomePresence():
 
             for line in reversed(log_lines):
                 for biome in self.biome_data:
-                    if biome in line:
+                    if f'"largeImage":{{"hoverText":"{biome}"' in line:
                         threading.Thread(target=self.handle_biome_detection, args=(biome,)).start()
                         return
 
